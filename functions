@@ -71,6 +71,16 @@ ensure_shared_container() {
     -v "${PLUGIN_DATA_ROOT}/_rabbitmqdata:/var/lib/rabbitmq" \
     "${PLUGIN_IMAGE}:${PLUGIN_IMAGE_VERSION}" \
     >/dev/null
+
+  # docker run --detach returns before the broker finishes booting (~5-10s).
+  # Block until the node is ready so the vhost/user ops that follow don't race
+  # startup. await_startup blocks on its own; the retry loop also tolerates the
+  # brief window where `docker exec` into the new container isn't ready yet.
+  local tries=0
+  until run_rabbitmq_admin await_startup >/dev/null 2>&1; do
+    (( ++tries >= 60 )) && { echo "shared RabbitMQ did not become ready in time" >&2; return 1; }
+    sleep 1
+  done
 }
 
 service_create() {
