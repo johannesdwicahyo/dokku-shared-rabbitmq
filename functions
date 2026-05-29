@@ -122,3 +122,45 @@ service_destroy() {
 
   rm -rf "${PLUGIN_DATA_ROOT:?}/$name"
 }
+
+service_link() {
+  local name="$1" app="${2:-}"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+  if [[ -z "$app" ]]; then
+    echo "app name required" >&2
+    return 2
+  fi
+
+  local dsn
+  dsn="$(service_dsn "$name")"
+
+  dokku config:set --no-restart "$app" "RABBITMQ_URL=$dsn"
+
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
+  if ! grep -qx "$app" "$links_file" 2>/dev/null; then
+    printf '%s\n' "$app" >>"$links_file"
+  fi
+}
+
+service_unlink() {
+  local name="$1" app="${2:-}"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+  if [[ -z "$app" ]]; then
+    echo "app name required" >&2
+    return 2
+  fi
+
+  dokku config:unset --no-restart "$app" RABBITMQ_URL || true
+
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
+  if [[ -f "$links_file" ]]; then
+    grep -vx "$app" "$links_file" >"${links_file}.tmp" || true
+    mv "${links_file}.tmp" "$links_file"
+  fi
+}
