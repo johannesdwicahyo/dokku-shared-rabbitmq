@@ -46,3 +46,20 @@ setup() {
   pw="$(<"$PLUGIN_DATA_ROOT/demo/PASSWORD")"
   [[ "$output" == "amqp://demo:${pw}@dokku-shared-rabbitmq:5672/demo" ]]
 }
+
+@test "service_destroy issues delete_user + delete_vhost and removes the data dir" {
+  service_create "demo"
+  : >"$STUB_LOG"
+  service_destroy "demo"
+  [[ ! -d "$PLUGIN_DATA_ROOT/demo" ]]
+  run grep -c 'docker exec.*delete_user demo' "$STUB_LOG"
+  [[ "$output" -ge 1 ]]
+  run grep -c 'docker exec.*delete_vhost demo' "$STUB_LOG"
+  [[ "$output" -ge 1 ]]
+}
+
+@test "service_destroy errors when tenant is missing" {
+  run service_destroy "ghost"
+  [[ "$status" -ne 0 ]]
+  [[ "$output" == *"does not exist"* ]]
+}

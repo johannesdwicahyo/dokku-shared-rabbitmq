@@ -106,3 +106,19 @@ service_create() {
   # Full configure/write/read WITHIN the vhost, nothing outside it.
   run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" ".*" ".*" >/dev/null
 }
+
+service_destroy() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  # delete_vhost drops every queue, exchange, binding, and message in the
+  # vhost; delete_user removes the tenant login. Both tolerate already-gone state.
+  run_rabbitmq_admin delete_user "$name" >/dev/null 2>&1 || true
+  run_rabbitmq_admin delete_vhost "$name" >/dev/null 2>&1 || true
+
+  rm -rf "${PLUGIN_DATA_ROOT:?}/$name"
+}
