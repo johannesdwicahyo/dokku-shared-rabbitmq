@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Plugin identity
+PLUGIN_COMMAND_PREFIX="shared-rabbitmq"
+PLUGIN_SERVICE="shared-rabbitmq"
+
+# Shared RabbitMQ container
+PLUGIN_IMAGE="rabbitmq"
+PLUGIN_IMAGE_VERSION="3-management"
+PLUGIN_CONTAINER_NAME="dokku-shared-rabbitmq"
+PLUGIN_NETWORK_NAME="dokku-shared-rabbitmq"
+PLUGIN_DB_PORT="5672"
+PLUGIN_MEMORY_LIMIT="${PLUGIN_MEMORY_LIMIT:-1g}"
+
+# Filesystem layout (overrideable for tests)
+PLUGIN_DATA_ROOT="${PLUGIN_DATA_ROOT:-/var/lib/dokku/services/shared-rabbitmq}"
+
+# Defaults (per-tenant)
+PLUGIN_DEFAULT_QUOTA_MSGS="${PLUGIN_DEFAULT_QUOTA_MSGS:-10000}"
+
+# Tenant name validation. Lowercase alpha start, [a-z0-9_-], 1..31 chars.
+# The name is the vhost, the AMQP username, AND the AMQP URL path segment,
+# so keep it free of characters needing percent-encoding.
+PLUGIN_NAME_REGEX='^[a-z][a-z0-9_-]{0,30}$'
+
+export PLUGIN_COMMAND_PREFIX PLUGIN_SERVICE \
+       PLUGIN_IMAGE PLUGIN_IMAGE_VERSION \
+       PLUGIN_CONTAINER_NAME PLUGIN_NETWORK_NAME PLUGIN_DB_PORT \
+       PLUGIN_MEMORY_LIMIT PLUGIN_DATA_ROOT \
+       PLUGIN_DEFAULT_QUOTA_MSGS PLUGIN_NAME_REGEX
