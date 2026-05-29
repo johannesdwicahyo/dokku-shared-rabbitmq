@@ -230,3 +230,53 @@ service_check_quota() {
     fi
   fi
 }
+
+service_info() {
+  local name="$1"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  local msgs quota violated links_csv
+  msgs="$(tenant_usage "$name")"
+  quota="$(service_get_quota_msgs "$name")"
+  violated="false"
+  [[ -f "$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED" ]] && violated="true"
+
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/LINKS" ]]; then
+    links_csv="$(tr '\n' ',' <"$PLUGIN_DATA_ROOT/$name/LINKS")"
+    links_csv="${links_csv%,}"
+  else
+    links_csv=""
+  fi
+
+  printf 'name=%s\n'        "$name"
+  printf 'user=%s\n'        "$name"
+  printf 'vhost=%s\n'       "$name"
+  printf 'host=%s\n'        "$PLUGIN_CONTAINER_NAME"
+  printf 'port=%s\n'        "$PLUGIN_DB_PORT"
+  printf 'messages=%s\n'    "$msgs"
+  printf 'quota_msgs=%s\n'  "$quota"
+  printf 'read_only=%s\n'   "$violated"
+  printf 'linked_apps=%s\n' "$links_csv"
+}
+
+# Per-tenant export/import is a v0.2 stretch goal — see CLAUDE.md. A robust
+# implementation must handle queue contents, bindings, and exchange topology;
+# a host-level volume snapshot of the shared container is sufficient for v0.1.0.
+# These stubs keep the CLI surface stable so callers don't break when the real
+# implementation lands.
+service_export() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-rabbitmq:export is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal); snapshot the shared container volume for now" >&2
+  return 1
+}
+
+service_import() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-rabbitmq:import is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal)" >&2
+  return 1
+}
