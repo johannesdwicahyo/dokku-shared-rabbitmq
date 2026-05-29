@@ -32,3 +32,67 @@ service_list() {
     printf '%s\n' "$name"
   done | sort
 }
+
+# Run rabbitmqctl against the shared container. rabbitmqctl authenticates to
+# the local node via the Erlang cookie inside the container — no AMQP password
+# needed. Executes inside the container via docker exec so the plugin never
+# requires host-side rabbitmqctl and never depends on the container hostname
+# resolving from the host.
+run_rabbitmq_admin() {
+  docker exec -i "$PLUGIN_CONTAINER_NAME" rabbitmqctl "$@"
+}
+
+service_dsn() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 1; }
+  local password
+  password="$(<"$PLUGIN_DATA_ROOT/$name/PASSWORD")"
+  printf 'amqp://%s:%s@%s:%s/%s\n' \
+    "$name" "$password" "$PLUGIN_CONTAINER_NAME" "$PLUGIN_DB_PORT" "$name"
+}
+
+# Make sure the shared RabbitMQ container is up. Idempotent.
+ensure_shared_container() {
+  local existing
+  existing="$(docker ps --filter "name=^${PLUGIN_CONTAINER_NAME}$" --format '{{.Names}}' || true)"
+  if [[ -n "$existing" ]]; then
+    return 0
+  fi
+
+  docker network create "$PLUGIN_NETWORK_NAME" >/dev/null 2>&1 || true
+
+  # Queue durability + vhost/user/permission state live in the mounted volume
+  # under /var/lib/rabbitmq. --memory caps the whole shared container.
+  docker run --detach \
+    --name "$PLUGIN_CONTAINER_NAME" \
+    --network "$PLUGIN_NETWORK_NAME" \
+    --restart always \
+    --memory "$PLUGIN_MEMORY_LIMIT" \
+    -v "${PLUGIN_DATA_ROOT}/_rabbitmqdata:/var/lib/rabbitmq" \
+    "${PLUGIN_IMAGE}:${PLUGIN_IMAGE_VERSION}" \
+    >/dev/null
+}
+
+service_create() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if service_exists "$name"; then
+    echo "service already exists: $name" >&2
+    return 3
+  fi
+  ensure_shared_container
+
+  local pw
+  pw="$(generate_password)"
+
+  # Write metadata BEFORE issuing rabbitmqctl ops — destroy can clean up if it fails.
+  mkdir -p "$PLUGIN_DATA_ROOT/$name"
+  printf '%s' "$pw" >"$PLUGIN_DATA_ROOT/$name/PASSWORD"
+  : >"$PLUGIN_DATA_ROOT/$name/LINKS"
+  chmod 600 "$PLUGIN_DATA_ROOT/$name/PASSWORD"
+
+  run_rabbitmq_admin add_vhost "$name" >/dev/null
+  run_rabbitmq_admin add_user "$name" "$pw" >/dev/null
+  # Full configure/write/read WITHIN the vhost, nothing outside it.
+  run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" ".*" ".*" >/dev/null
+}
