@@ -193,7 +193,7 @@ service_unset_quota() {
 tenant_usage() {
   local name="$1"
   run_rabbitmq_admin list_queues -p "$name" messages -q 2>/dev/null \
-    | awk '/^[0-9]+$/{s+=$1} END{print s+0}'
+    | awk '$NF~/^[0-9]+$/{s+=$NF} END{print s+0}'
 }
 
 service_check_quota() {
@@ -207,12 +207,18 @@ service_check_quota() {
 
   local marker="$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED"
   local over=false
-  (( msgs > quota )) && over=true
+  if (( msgs > quota )); then
+    over=true
+  fi
 
   if $over; then
     if [[ ! -f "$marker" ]]; then
       # Revoke write (configure/read kept) by setting the write regex empty.
       run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" "" ".*" >/dev/null
+      # Touch the marker only AFTER set_permissions succeeds: if the rabbitmqctl
+      # call fails, set -e aborts before we record the flip, so the next sweep
+      # retries (set_permissions is idempotent) rather than reporting a flip that
+      # never happened.
       : >"$marker"
       printf 'flipped name=%s msgs=%s cap=%s -> read_only\n' "$name" "$msgs" "$quota"
     fi
