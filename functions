@@ -164,3 +164,63 @@ service_unlink() {
     mv "${links_file}.tmp" "$links_file"
   fi
 }
+
+service_get_quota_msgs() {
+  local name="$1"
+  local f="$PLUGIN_DATA_ROOT/$name/QUOTA_MSGS"
+  if [[ -s "$f" ]]; then
+    cat "$f"
+  else
+    printf '%s' "$PLUGIN_DEFAULT_QUOTA_MSGS"
+  fi
+}
+
+service_set_quota() {
+  local name="$1" msgs="${2:-}"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  [[ "$msgs" =~ ^[1-9][0-9]*$ ]] || { echo "quota must be a positive integer: $msgs" >&2; return 2; }
+  printf '%s' "$msgs" >"$PLUGIN_DATA_ROOT/$name/QUOTA_MSGS"
+}
+
+service_unset_quota() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  rm -f "$PLUGIN_DATA_ROOT/$name/QUOTA_MSGS"
+}
+
+# Total message count across all queues in the tenant's vhost. The numeric-line
+# filter is robust to header/quiet-mode differences across RabbitMQ versions.
+tenant_usage() {
+  local name="$1"
+  run_rabbitmq_admin list_queues -p "$name" messages -q 2>/dev/null \
+    | awk '/^[0-9]+$/{s+=$1} END{print s+0}'
+}
+
+service_check_quota() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+
+  local quota msgs
+  quota="$(service_get_quota_msgs "$name")"
+  msgs="$(tenant_usage "$name")"
+  [[ -z "$msgs" ]] && msgs=0
+
+  local marker="$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED"
+  local over=false
+  (( msgs > quota )) && over=true
+
+  if $over; then
+    if [[ ! -f "$marker" ]]; then
+      # Revoke write (configure/read kept) by setting the write regex empty.
+      run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" "" ".*" >/dev/null
+      : >"$marker"
+      printf 'flipped name=%s msgs=%s cap=%s -> read_only\n' "$name" "$msgs" "$quota"
+    fi
+  else
+    if [[ -f "$marker" ]]; then
+      run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" ".*" ".*" >/dev/null
+      rm -f "$marker"
+      printf 'released name=%s msgs=%s cap=%s -> writable\n' "$name" "$msgs" "$quota"
+    fi
+  fi
+}
