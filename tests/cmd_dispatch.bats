@@ -89,3 +89,40 @@ setup() {
   [[ "$output" == *"Vhost:"*"demo"* ]]
   [[ "$output" == *"Messages:"*"7"* ]]
 }
+
+@test "set-quota parses the positional message count" {
+  mkdir -p "$PLUGIN_DATA_ROOT/demo"
+  printf 'pw' >"$PLUGIN_DATA_ROOT/demo/PASSWORD"
+  run "$REPO_ROOT/subcommands/set-quota" "shared-rabbitmq:set-quota" "demo" "500"
+  [[ "$status" -eq 0 ]]
+  [[ "$(<"$PLUGIN_DATA_ROOT/demo/QUOTA_MSGS")" == "500" ]]
+}
+
+@test "set-quota errors without a count" {
+  mkdir -p "$PLUGIN_DATA_ROOT/demo"
+  printf 'pw' >"$PLUGIN_DATA_ROOT/demo/PASSWORD"
+  run "$REPO_ROOT/subcommands/set-quota" "shared-rabbitmq:set-quota" "demo"
+  [[ "$status" -ne 0 ]]
+}
+
+@test "unset-quota clears the override" {
+  mkdir -p "$PLUGIN_DATA_ROOT/demo"
+  printf 'pw' >"$PLUGIN_DATA_ROOT/demo/PASSWORD"
+  printf '500' >"$PLUGIN_DATA_ROOT/demo/QUOTA_MSGS"
+  run "$REPO_ROOT/subcommands/unset-quota" "shared-rabbitmq:unset-quota" "demo"
+  [[ "$status" -eq 0 ]]
+  [[ ! -f "$PLUGIN_DATA_ROOT/demo/QUOTA_MSGS" ]]
+}
+
+@test "check-quotas sweeps all tenants and flips the over-cap one" {
+  mkdir -p "$PLUGIN_DATA_ROOT/demo"
+  printf 'pw' >"$PLUGIN_DATA_ROOT/demo/PASSWORD"
+  : >"$PLUGIN_DATA_ROOT/demo/LINKS"
+  printf '10' >"$PLUGIN_DATA_ROOT/demo/QUOTA_MSGS"
+  stub_response docker $'40'   # tenant_usage for demo
+  stub_response docker ''      # set_permissions
+  run "$REPO_ROOT/subcommands/check-quotas" "shared-rabbitmq:check-quotas"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == *"flipped"* ]]
+  [[ -f "$PLUGIN_DATA_ROOT/demo/QUOTA_VIOLATED" ]]
+}
