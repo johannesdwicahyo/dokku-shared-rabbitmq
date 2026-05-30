@@ -49,10 +49,17 @@ sudo -u dokku dokku shared-rabbitmq:info "$TENANT" | tee /tmp/.smoke-info
 grep -q "Vhost:.*$TENANT" /tmp/.smoke-info || { echo "FAIL: info missing Vhost"; exit 1; }
 
 step "6. vhost + user + permissions exist"
-ctl list_vhosts | grep -qx "$TENANT" || { echo "FAIL: vhost missing"; exit 1; }
-ctl list_users  | grep -q "^$TENANT" || { echo "FAIL: user missing"; exit 1; }
-ctl list_permissions -p "$TENANT" | grep -q "$TENANT" \
-  || { echo "FAIL: permissions missing on vhost"; exit 1; }
+# Note: rabbitmqctl emits a multi-line table; piping straight into
+# `grep -q` under `set -euo pipefail` produces a SIGPIPE-141 on
+# rabbitmqctl when grep short-circuits, which pipefail then surfaces
+# as a failure even though the match was found. Capture first, match
+# second.
+users="$(ctl list_users)"
+vhosts="$(ctl list_vhosts)"
+perms="$(ctl list_permissions -p "$TENANT")"
+echo "$vhosts" | grep -qx "$TENANT" || { echo "FAIL: vhost missing"; exit 1; }
+echo "$users"  | grep -q "^$TENANT" || { echo "FAIL: user missing"; exit 1; }
+echo "$perms"  | grep -q "$TENANT"  || { echo "FAIL: permissions missing on vhost"; exit 1; }
 
 step "7. cross-tenant isolation: tenant2 has no access to tenant1's vhost"
 sudo -u dokku dokku shared-rabbitmq:create "$TENANT2" >/dev/null
@@ -60,22 +67,30 @@ perms2_on_t1="$(ctl list_permissions -p "$TENANT" | grep -c "^$TENANT2" || true)
 [[ "$perms2_on_t1" == "0" ]] || { echo "FAIL: tenant2 has permissions on tenant1 vhost"; exit 1; }
 
 step "8. publish a message into tenant1's vhost (via management/declare)"
-# Declare a durable queue and publish via rabbitmqadmin if present; otherwise
-# use rabbitmqctl eval to enqueue. Simplest portable path: declare + publish
-# through the HTTP API as the tenant user.
+# rabbitmqadmin talks to the HTTP management API, which checks the user's
+# `management` tag (separate from vhost permissions). Tenant users don't
+# have the tag by design — production isolation. Grant it for the duration
+# of the smoke so the test rig can declare a queue + publish, then drop
+# the tag again at step 9's end so the smoke leaves the user in the same
+# state production code would set up.
 ctl set_permissions -p "$TENANT" "$TENANT" ".*" ".*" ".*" >/dev/null
-docker exec "$CONTAINER" rabbitmqadmin -V "$TENANT" -u "$TENANT" \
-  -p "$(sudo -u dokku cat /var/lib/dokku/services/shared-rabbitmq/$TENANT/PASSWORD)" \
-  declare queue name=jobs durable=true 2>/dev/null || echo "  (rabbitmqadmin declare skipped)"
+ctl set_user_tags    "$TENANT" management >/dev/null
+TPW="$(sudo -u dokku cat /var/lib/dokku/services/shared-rabbitmq/$TENANT/PASSWORD)"
+docker exec "$CONTAINER" rabbitmqadmin -V "$TENANT" -u "$TENANT" -p "$TPW" \
+  declare queue name=jobs durable=true \
+  || { echo "FAIL: rabbitmqadmin declare failed"; exit 1; }
 
 step "9. quota: tiny cap flips read-only"
 sudo -u dokku dokku shared-rabbitmq:set-quota "$TENANT" 1
 # Push 2 messages so usage (>1) exceeds the cap, then sweep.
 for i in 1 2; do
-  docker exec "$CONTAINER" rabbitmqadmin -V "$TENANT" -u "$TENANT" \
-    -p "$(sudo -u dokku cat /var/lib/dokku/services/shared-rabbitmq/$TENANT/PASSWORD)" \
-    publish routing_key=jobs payload="m$i" 2>/dev/null || true
+  docker exec "$CONTAINER" rabbitmqadmin -V "$TENANT" -u "$TENANT" -p "$TPW" \
+    publish routing_key=jobs payload="m$i" \
+    || { echo "FAIL: rabbitmqadmin publish $i failed"; exit 1; }
 done
+# Strip the smoke-only management tag now so subsequent steps see the
+# tenant in the same state the plugin's create returned them in.
+ctl set_user_tags "$TENANT" >/dev/null
 sudo -u dokku dokku shared-rabbitmq:check-quotas
 sudo -u dokku dokku shared-rabbitmq:info "$TENANT" | grep -q "Read-only:.*true" \
   || { echo "FAIL: quota didn't flip read-only"; exit 1; }
