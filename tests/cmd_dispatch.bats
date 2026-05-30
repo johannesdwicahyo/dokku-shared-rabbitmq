@@ -126,3 +126,39 @@ setup() {
   [[ "$output" == *"flipped"* ]]
   [[ -f "$PLUGIN_DATA_ROOT/demo/QUOTA_VIOLATED" ]]
 }
+
+@test "connect --print-only prints the docker exec command and the vhost" {
+  mkdir -p "$PLUGIN_DATA_ROOT/demo"
+  printf 'pw' >"$PLUGIN_DATA_ROOT/demo/PASSWORD"
+  run "$REPO_ROOT/subcommands/connect" "shared-rabbitmq:connect" "demo" "--print-only"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == *"docker exec -it dokku-shared-rabbitmq bash"* ]]
+  [[ "$output" == *"demo"* ]]
+}
+
+@test "connect errors when tenant is missing" {
+  run "$REPO_ROOT/subcommands/connect" "shared-rabbitmq:connect" "ghost" "--print-only"
+  [[ "$status" -ne 0 ]]
+  [[ "$output" == *"does not exist"* ]]
+}
+
+@test "export errors with stretch-goal message and non-zero exit" {
+  mkdir -p "$PLUGIN_DATA_ROOT/demo"
+  printf 'pw' >"$PLUGIN_DATA_ROOT/demo/PASSWORD"
+  run "$REPO_ROOT/subcommands/export" "shared-rabbitmq:export" "demo"
+  [[ "$status" -ne 0 ]]
+  [[ "$output" == *"v0.2 stretch goal"* ]]
+}
+
+@test "import errors with stretch-goal message and non-zero exit" {
+  mkdir -p "$PLUGIN_DATA_ROOT/demo"
+  printf 'pw' >"$PLUGIN_DATA_ROOT/demo/PASSWORD"
+  run "$REPO_ROOT/subcommands/import" "shared-rabbitmq:import" "demo"
+  [[ "$status" -ne 0 ]]
+  [[ "$output" == *"not implemented in v0.1.0"* ]]
+}
+
+@test "commands dispatcher routes unknown subcommand to error" {
+  run "$REPO_ROOT/commands" "shared-rabbitmq:does-not-exist"
+  [[ "$status" -ne 0 ]]
+}

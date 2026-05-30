@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DOKKU_TRACE:-}" == "1" ]] && set -x
+
+PLUGIN_ROOT="$(cd "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_ROOT/config"
+# shellcheck source=functions
+source "$PLUGIN_ROOT/functions"
+
+shift || true
+
+name="${1:-}"
+flag="${2:-}"
+if [[ -z "$name" ]]; then
+  echo "usage: dokku $PLUGIN_COMMAND_PREFIX:connect <name> [--print-only]" >&2
+  exit 2
+fi
+if ! service_exists "$name"; then
+  echo "service does not exist: $name" >&2
+  exit 3
+fi
+
+# rabbitmqctl is not an interactive REPL, so connect drops the operator into a
+# shell inside the shared container, scoped (by convention) to the tenant vhost.
+if [[ "$flag" == "--print-only" ]]; then
+  printf 'docker exec -it %s bash   # then e.g.: rabbitmqctl list_queues -p %s\n' \
+    "$PLUGIN_CONTAINER_NAME" "$name"
+  exit 0
+fi
+
+echo "Opening a shell in $PLUGIN_CONTAINER_NAME. Tenant vhost: $name" >&2
+echo "Scope rabbitmqctl to it, e.g.: rabbitmqctl list_queues -p $name" >&2
+exec docker exec -it "$PLUGIN_CONTAINER_NAME" bash
