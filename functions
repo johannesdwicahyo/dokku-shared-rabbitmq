@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Shared helpers for shared-rabbitmq. Sourced — never executed directly.
+set -euo pipefail
+
+generate_password() {
+  # 16 random bytes -> 32 hex chars. Available everywhere; no openssl dep.
+  od -An -tx1 -N16 /dev/urandom | tr -d ' \n'
+}
+
+validate_name() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || return 1
+  [[ "$name" =~ $PLUGIN_NAME_REGEX ]] || return 1
+}
+
+service_exists() {
+  local name="$1"
+  [[ -d "$PLUGIN_DATA_ROOT/$name" ]]
+}
+
+service_list() {
+  [[ -d "$PLUGIN_DATA_ROOT" ]] || return 0
+  local d
+  for d in "$PLUGIN_DATA_ROOT"/*/; do
+    [[ -d "$d" ]] || continue
+    local name="${d%/}"
+    name="${name##*/}"
+    [[ "$name" == .* ]] && continue
+    # `_rabbitmqdata` is the container's data volume mount, not a tenant.
+    # Anything starting with `_` is reserved for plugin internals.
+    [[ "$name" == _* ]] && continue
+    printf '%s\n' "$name"
+  done | sort
+}
+
+# Run rabbitmqctl against the shared container. rabbitmqctl authenticates to
+# the local node via the Erlang cookie inside the container — no AMQP password
+# needed. Executes inside the container via docker exec so the plugin never
+# requires host-side rabbitmqctl and never depends on the container hostname
+# resolving from the host.
+run_rabbitmq_admin() {
+  docker exec -i "$PLUGIN_CONTAINER_NAME" rabbitmqctl "$@"
+}
+
+service_dsn() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 1; }
+  local password
+  password="$(<"$PLUGIN_DATA_ROOT/$name/PASSWORD")"
+  printf 'amqp://%s:%s@%s:%s/%s\n' \
+    "$name" "$password" "$PLUGIN_CONTAINER_NAME" "$PLUGIN_DB_PORT" "$name"
+}
+
+# Make sure the shared RabbitMQ container is up. Idempotent.
+ensure_shared_container() {
+  local existing
+  existing="$(docker ps --filter "name=^${PLUGIN_CONTAINER_NAME}$" --format '{{.Names}}' || true)"
+  if [[ -n "$existing" ]]; then
+    return 0
+  fi
+
+  docker network create "$PLUGIN_NETWORK_NAME" >/dev/null 2>&1 || true
+
+  # Queue durability + vhost/user/permission state live in the mounted volume
+  # under /var/lib/rabbitmq. --memory caps the whole shared container.
+  docker run --detach \
+    --name "$PLUGIN_CONTAINER_NAME" \
+    --network "$PLUGIN_NETWORK_NAME" \
+    --restart always \
+    --memory "$PLUGIN_MEMORY_LIMIT" \
+    -v "${PLUGIN_DATA_ROOT}/_rabbitmqdata:/var/lib/rabbitmq" \
+    "${PLUGIN_IMAGE}:${PLUGIN_IMAGE_VERSION}" \
+    >/dev/null
+
+  # docker run --detach returns before the broker finishes booting (~5-10s).
+  # Block until the node is ready so the vhost/user ops that follow don't race
+  # startup. await_startup blocks on its own; the retry loop also tolerates the
+  # brief window where `docker exec` into the new container isn't ready yet.
+  local tries=0
+  until run_rabbitmq_admin await_startup >/dev/null 2>&1; do
+    (( ++tries >= 60 )) && { echo "shared RabbitMQ did not become ready in time" >&2; return 1; }
+    sleep 1
+  done
+}
+
+service_create() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if service_exists "$name"; then
+    echo "service already exists: $name" >&2
+    return 3
+  fi
+  ensure_shared_container
+
+  local pw
+  pw="$(generate_password)"
+
+  # Write metadata BEFORE issuing rabbitmqctl ops — destroy can clean up if it fails.
+  mkdir -p "$PLUGIN_DATA_ROOT/$name"
+  printf '%s' "$pw" >"$PLUGIN_DATA_ROOT/$name/PASSWORD"
+  : >"$PLUGIN_DATA_ROOT/$name/LINKS"
+  chmod 600 "$PLUGIN_DATA_ROOT/$name/PASSWORD"
+
+  run_rabbitmq_admin add_vhost "$name" >/dev/null
+  run_rabbitmq_admin add_user "$name" "$pw" >/dev/null
+  # Full configure/write/read WITHIN the vhost, nothing outside it.
+  run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" ".*" ".*" >/dev/null
+}
+
+service_destroy() {
+  local name="$1"
+  validate_name "$name" || { echo "invalid tenant name: $name" >&2; return 2; }
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  # delete_vhost drops every queue, exchange, binding, and message in the
+  # vhost; delete_user removes the tenant login. Both tolerate already-gone state.
+  run_rabbitmq_admin delete_user "$name" >/dev/null 2>&1 || true
+  run_rabbitmq_admin delete_vhost "$name" >/dev/null 2>&1 || true
+
+  rm -rf "${PLUGIN_DATA_ROOT:?}/$name"
+}
+
+service_link() {
+  local name="$1" app="${2:-}"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+  if [[ -z "$app" ]]; then
+    echo "app name required" >&2
+    return 2
+  fi
+
+  local dsn
+  dsn="$(service_dsn "$name")"
+
+  dokku config:set --no-restart "$app" "RABBITMQ_URL=$dsn"
+
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
+  if ! grep -qx "$app" "$links_file" 2>/dev/null; then
+    printf '%s\n' "$app" >>"$links_file"
+  fi
+}
+
+service_unlink() {
+  local name="$1" app="${2:-}"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+  if [[ -z "$app" ]]; then
+    echo "app name required" >&2
+    return 2
+  fi
+
+  dokku config:unset --no-restart "$app" RABBITMQ_URL || true
+
+  local links_file="$PLUGIN_DATA_ROOT/$name/LINKS"
+  if [[ -f "$links_file" ]]; then
+    grep -vx "$app" "$links_file" >"${links_file}.tmp" || true
+    mv "${links_file}.tmp" "$links_file"
+  fi
+}
+
+service_get_quota_msgs() {
+  local name="$1"
+  local f="$PLUGIN_DATA_ROOT/$name/QUOTA_MSGS"
+  if [[ -s "$f" ]]; then
+    cat "$f"
+  else
+    printf '%s' "$PLUGIN_DEFAULT_QUOTA_MSGS"
+  fi
+}
+
+service_set_quota() {
+  local name="$1" msgs="${2:-}"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  [[ "$msgs" =~ ^[1-9][0-9]*$ ]] || { echo "quota must be a positive integer: $msgs" >&2; return 2; }
+  printf '%s' "$msgs" >"$PLUGIN_DATA_ROOT/$name/QUOTA_MSGS"
+}
+
+service_unset_quota() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  rm -f "$PLUGIN_DATA_ROOT/$name/QUOTA_MSGS"
+}
+
+# Total message count across all queues in the tenant's vhost. The numeric-line
+# filter is robust to header/quiet-mode differences across RabbitMQ versions.
+tenant_usage() {
+  local name="$1"
+  run_rabbitmq_admin list_queues -p "$name" messages -q 2>/dev/null \
+    | awk '$NF~/^[0-9]+$/{s+=$NF} END{print s+0}'
+}
+
+service_check_quota() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+
+  local quota msgs
+  quota="$(service_get_quota_msgs "$name")"
+  msgs="$(tenant_usage "$name")"
+  [[ -z "$msgs" ]] && msgs=0
+
+  local marker="$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED"
+  local over=false
+  if (( msgs > quota )); then
+    over=true
+  fi
+
+  if $over; then
+    if [[ ! -f "$marker" ]]; then
+      # Revoke write (configure/read kept) by setting the write regex empty.
+      run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" "" ".*" >/dev/null
+      # Touch the marker only AFTER set_permissions succeeds: if the rabbitmqctl
+      # call fails, set -e aborts before we record the flip, so the next sweep
+      # retries (set_permissions is idempotent) rather than reporting a flip that
+      # never happened.
+      : >"$marker"
+      printf 'flipped name=%s msgs=%s cap=%s -> read_only\n' "$name" "$msgs" "$quota"
+    fi
+  else
+    if [[ -f "$marker" ]]; then
+      run_rabbitmq_admin set_permissions -p "$name" "$name" ".*" ".*" ".*" >/dev/null
+      rm -f "$marker"
+      printf 'released name=%s msgs=%s cap=%s -> writable\n' "$name" "$msgs" "$quota"
+    fi
+  fi
+}
+
+service_info() {
+  local name="$1"
+  if ! service_exists "$name"; then
+    echo "service does not exist: $name" >&2
+    return 3
+  fi
+
+  local msgs quota violated links_csv
+  msgs="$(tenant_usage "$name")"
+  quota="$(service_get_quota_msgs "$name")"
+  violated="false"
+  [[ -f "$PLUGIN_DATA_ROOT/$name/QUOTA_VIOLATED" ]] && violated="true"
+
+  if [[ -s "$PLUGIN_DATA_ROOT/$name/LINKS" ]]; then
+    links_csv="$(tr '\n' ',' <"$PLUGIN_DATA_ROOT/$name/LINKS")"
+    links_csv="${links_csv%,}"
+  else
+    links_csv=""
+  fi
+
+  printf 'name=%s\n'        "$name"
+  printf 'user=%s\n'        "$name"
+  printf 'vhost=%s\n'       "$name"
+  printf 'host=%s\n'        "$PLUGIN_CONTAINER_NAME"
+  printf 'port=%s\n'        "$PLUGIN_DB_PORT"
+  printf 'messages=%s\n'    "$msgs"
+  printf 'quota_msgs=%s\n'  "$quota"
+  printf 'read_only=%s\n'   "$violated"
+  printf 'linked_apps=%s\n' "$links_csv"
+}
+
+# Per-tenant export/import is a v0.2 stretch goal — see CLAUDE.md. A robust
+# implementation must handle queue contents, bindings, and exchange topology;
+# a host-level volume snapshot of the shared container is sufficient for v0.1.0.
+# These stubs keep the CLI surface stable so callers don't break when the real
+# implementation lands.
+service_export() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-rabbitmq:export is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal); snapshot the shared container volume for now" >&2
+  return 1
+}
+
+service_import() {
+  local name="$1"
+  service_exists "$name" || { echo "service does not exist: $name" >&2; return 3; }
+  echo "shared-rabbitmq:import is not implemented in v0.1.0 (per-tenant backup is a v0.2 stretch goal)" >&2
+  return 1
+}

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DOKKU_TRACE:-}" == "1" ]] && set -x
+
+PLUGIN_ROOT="$(cd "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_ROOT/config"
+# shellcheck source=functions
+source "$PLUGIN_ROOT/functions"
+
+shift || true
+
+name="${1:-}"
+if [[ -z "$name" ]]; then
+  echo "usage: dokku $PLUGIN_COMMAND_PREFIX:info <name>" >&2
+  exit 2
+fi
+if ! service_exists "$name"; then
+  echo "service does not exist: $name" >&2
+  exit 3
+fi
+
+i_name="" i_user="" i_vhost="" i_host="" i_port=""
+i_messages="" i_quota_msgs="" i_read_only="" i_linked_apps=""
+
+while IFS='=' read -r key value; do
+  [[ -z "$key" ]] && continue
+  case "$key" in
+    name)        i_name="$value" ;;
+    user)        i_user="$value" ;;
+    vhost)       i_vhost="$value" ;;
+    host)        i_host="$value" ;;
+    port)        i_port="$value" ;;
+    messages)    i_messages="$value" ;;
+    quota_msgs)  i_quota_msgs="$value" ;;
+    read_only)   i_read_only="$value" ;;
+    linked_apps) i_linked_apps="$value" ;;
+  esac
+done < <(service_info "$name")
+
+printf '%-22s %s\n'      "Name:"        "$i_name"
+printf '%-22s %s\n'      "AMQP user:"   "$i_user"
+printf '%-22s %s\n'      "Vhost:"       "$i_vhost"
+printf '%-22s %s:%s\n'   "Host:"        "$i_host" "$i_port"
+printf '%-22s %s / %s\n' "Messages:"    "$i_messages" "$i_quota_msgs"
+printf '%-22s %s\n'      "Read-only:"   "$i_read_only"
+printf '%-22s %s\n'      "Linked apps:" "${i_linked_apps:-(none)}"

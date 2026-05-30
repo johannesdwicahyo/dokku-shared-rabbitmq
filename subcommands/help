@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${DOKKU_TRACE:-}" == "1" ]] && set -x
+
+PLUGIN_ROOT="$(cd "$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_ROOT/config"
+
+cat <<EOF
+Usage: dokku $PLUGIN_COMMAND_PREFIX:<command> [args]
+
+Commands:
+  $PLUGIN_COMMAND_PREFIX:create <name>                  Create a tenant: vhost + user + scoped permissions.
+  $PLUGIN_COMMAND_PREFIX:destroy <name> -f              Drop a tenant: delete_user + delete_vhost (all queues/messages).
+  $PLUGIN_COMMAND_PREFIX:link <name> <app>              Set RABBITMQ_URL on <app>.
+  $PLUGIN_COMMAND_PREFIX:unlink <name> <app>            Remove RABBITMQ_URL from <app>.
+  $PLUGIN_COMMAND_PREFIX:list                           List all tenants on this host.
+  $PLUGIN_COMMAND_PREFIX:info <name>                    Tenant details: vhost, message count, quota, links.
+  $PLUGIN_COMMAND_PREFIX:connect <name>                 Open a shell in the shared container, scoped to the vhost.
+  $PLUGIN_COMMAND_PREFIX:set-quota <name> <msg_count>   Set the per-tenant message cap.
+  $PLUGIN_COMMAND_PREFIX:unset-quota <name>             Clear the quota override; revert to default.
+  $PLUGIN_COMMAND_PREFIX:check-quotas                   Run the quota sweep manually (auto-runs every 5min).
+  $PLUGIN_COMMAND_PREFIX:export <name>                  [stretch goal — not in v0.1.0]
+  $PLUGIN_COMMAND_PREFIX:import <name>                  [stretch goal — not in v0.1.0]
+  $PLUGIN_COMMAND_PREFIX:help                           Show this help text.
+
+Tenant isolation: each tenant gets a native RabbitMQ vhost plus a user whose
+permissions are scoped to that vhost only. One tenant's queues, exchanges, and
+bindings are invisible to another. Over the message quota, the tenant user's
+write permission is revoked until usage drops.
+EOF
